@@ -157,6 +157,17 @@ python main.py loss.name=CrossEntropy sampling.name=none stage2.enabled=true sta
 python main.py loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=crt stage2.epochs=100 stage2.lr=0.1 stage2.optimizer=SGD stage2.loss=LOS +stage2.los_smoothing=0.98 stage2.sampler=class_uniform stage2.freeze_bn=true stage2.warmup_epochs=5
 ```
 
+#### MoE-LTSEI (Ours)
+> 我们的方法：Stage-2 冻结 backbone，分类器替换为 MoE 头，门控采用 logit-adjusted 先验。
+> - Expert-0: Generalist Linear
+> - Expert-1: Tail Expert (Cosine + LDAM margin)
+> - Expert-2: Conservative Expert (Logit-Adjusted Linear)
+> 训练时使用 MoELoss = base loss + load-balancing，默认搭配 cost-sensitive loss 与 progressive sampling。
+
+```bash
+python main.py loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe stage2.loss=CostSensitiveCE stage2.cost_strategy=auto stage2.sampler=progressive_power stage2.alpha_start=1.0 stage2.alpha_end=0.0 stage2.moe_config.num_experts=3 stage2.moe_config.w_balance=0.1
+```
+
 ---
 
 ### 3.5 后处理/校准 (Post-hoc)
@@ -235,11 +246,13 @@ python main.py data.imbalance_ratio=200 model.name=ConvNetADSB loss.name=CrossEn
 | 参数 | 说明 | 示例 |
 |------|------|------|
 | `stage2.enabled` | 是否启用 Stage-2 | true, false |
-| `stage2.mode` | 模式 | crt, lws, finetune |
+| `stage2.mode` | 模式 | crt, lws, finetune, moe |
 | `stage2.epochs` | Stage-2 训练轮次 | 50, 100 |
 | `stage2.lr` | Stage-2 学习率 | 0.01, 0.1 |
 | `stage2.lws_init_scale` | LWS 缩放初值 | 1.0 |
 | `stage2.freeze_bn` | 是否冻结 BN | true, false |
+| `stage2.moe_config.num_experts` | MoE 专家数 | 3 |
+| `stage2.moe_config.w_balance` | MoE 负载均衡系数 | 0.1 |
 
 ---
 

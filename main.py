@@ -34,8 +34,8 @@ from omegaconf import DictConfig, OmegaConf
 
 # 数据与模型
 from data import LoaderConfig, build_dataloaders, make_long_tailed_indices, ADSBSignalDataset
-from models import create_model
-from losses import create_loss
+from models import create_model, swap_classifier
+from losses import create_loss, MoELoss
 from analysis import ClassificationAnalyzer
 from visualization import visualize_all_results
 
@@ -725,7 +725,7 @@ def main(cfg: DictConfig):
 
         # BN处理（在创建optimizer之前）
         if cfg.stage2.freeze_bn:
-            if cfg.stage2.mode in ('crt', 'lws'):
+            if cfg.stage2.mode in ('crt', 'lws', 'moe'):
                 print("[Stage-2] 冻结BN层统计量（CRT/LWS模式）")
                 base.apply(set_batchnorm_eval)
             elif cfg.stage2.sampler == 'same':
@@ -747,6 +747,43 @@ def main(cfg: DictConfig):
 
             stage2_lr = cfg.stage2.lr or cfg.training.lr
             print(f"[Stage-2] 学习率: {stage2_lr}")
+
+            optimizer2 = build_optimizer(
+                cfg.stage2.optimizer or cfg.training.optimizer,
+                params_to_optimize, stage2_lr, stage2_wd
+            )
+
+        elif cfg.stage2.mode == 'moe':
+            print("[Stage-2] MoE: freeze backbone, swap classifier to MoE head")
+            moe_cfg = getattr(cfg.stage2, 'moe_config', None)
+            if moe_cfg is None:
+                raise ValueError("[Stage-2] MoE requires stage2.moe_config")
+
+            num_experts = getattr(moe_cfg, 'num_experts', 3)
+            gate_tau = getattr(moe_cfg, 'gate_tau', 1.0)
+            la_tau = getattr(moe_cfg, 'la_tau', 1.0)
+            w_balance = getattr(moe_cfg, 'w_balance', 0.1)
+
+            swap_classifier(
+                base,
+                head="moe",
+                class_counts=class_counts,
+                num_experts=num_experts,
+                gate_tau=gate_tau,
+                tau=la_tau
+            )
+
+            freeze_backbone_params(base, ["classifier"])
+            for p in base.classifier.parameters():
+                p.requires_grad = True
+            params_to_optimize = [p for p in base.parameters() if p.requires_grad]
+
+            base_criterion = criterion2
+            criterion2 = MoELoss(base_criterion, w_balance=w_balance,
+                                 num_experts=num_experts).to(device)
+
+            stage2_lr = cfg.stage2.lr or cfg.training.lr
+            print(f"[Stage-2] Learning rate: {stage2_lr}")
 
             optimizer2 = build_optimizer(
                 cfg.stage2.optimizer or cfg.training.optimizer,

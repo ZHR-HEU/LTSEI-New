@@ -126,7 +126,7 @@ stage1:
 # ------------------------------------------------------------
 stage2:
   enabled: true
-  mode: "crt"  # crt | lws | finetune | moe_ltsei
+  mode: "moe"  # crt | lws | finetune | moe
   epochs: 300
   lr: 0.1
 
@@ -161,24 +161,9 @@ stage2:
   focal_gamma: 2.0
 
   # MoE 配置
-  moe:
+  moe_config:
     num_experts: 3
-    gate_hidden: 128
-    gate_dropout: 0.1
-    normalize_features: true
-
-  # MoE-LTSEI Loss 参数
-  moe_loss:
-    scale: 30.0
-    beta: 0.999
-    margin_m0: 0.35
-    margin_m1: 0.2
-    margin_gamma: 0.5
-    diff_gamma: 2.0
-    diff_alpha: 1.0
-    lambda_gate: 1.0
-    lambda_lb: 0.0
-
+    w_balance: 0.1
 
 # 这些参数被 stage2.sampler="progressive_power" 引用
 sampling_progressive:

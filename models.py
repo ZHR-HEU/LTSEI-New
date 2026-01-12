@@ -129,7 +129,7 @@ class TemperatureScaledClassifier(nn.Module):
         self.in_features = int(in_features)
         self.num_classes = int(num_classes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> torch.Tensor:
         logits = self.linear(x)
         return logits / (self.temperature + 1e-8)
 
@@ -163,7 +163,7 @@ class CosineMarginClassifier(nn.Module):
         w_norm = F.normalize(self.weight, dim=-1)
         logits = torch.matmul(x_norm, w_norm.t())
         if y is not None and self.margins is not None:
-            margins = self.margins.to(logits.device)
+            margins = self.margins.to(device=logits.device, dtype=logits.dtype)
             logits = logits.clone()
             logits.scatter_add_(1, y.view(-1, 1), (-margins[y]).view(-1, 1))
         return self.scale * logits
@@ -203,6 +203,128 @@ class LogitAdjustedLinear(nn.Module):
         return logits - self.tau * self.log_prior
 
 
+def init_model_for_imbalanced_linear(layer: nn.Linear, class_counts: Optional[np.ndarray]):
+    """Initialize linear bias with log-prior for imbalanced data."""
+    if class_counts is None:
+        return
+    prior = np.asarray(class_counts, dtype=np.float64)
+    prior = prior / np.clip(prior.sum(), 1.0, None)
+    with torch.no_grad():
+        if layer.bias is not None:
+            layer.bias.copy_(torch.tensor(np.log(prior + 1e-12), dtype=torch.float32))
+
+
+def _expert_priors_from_counts(class_counts: np.ndarray, num_experts: int) -> np.ndarray:
+    counts = np.asarray(class_counts, dtype=np.float64).reshape(-1)
+    counts = np.clip(counts, 1.0, None)
+    priors = counts / counts.sum()
+    if num_experts <= 1:
+        return np.ones(1, dtype=np.float64)
+
+    order = np.argsort(counts)
+    splits = np.array_split(order, min(num_experts, len(order)))
+    group_priors = [priors[idx].sum() for idx in splits]
+    if len(group_priors) < num_experts:
+        group_priors.extend([priors.mean()] * (num_experts - len(group_priors)))
+    group_priors = np.asarray(group_priors, dtype=np.float64)
+
+    if num_experts == 3:
+        tail_prior = group_priors[0]
+        head_prior = group_priors[-1]
+        mean_prior = priors.mean()
+        expert_prior = np.array([mean_prior, tail_prior, head_prior], dtype=np.float64)
+    else:
+        expert_prior = group_priors[:num_experts]
+
+    expert_prior = expert_prior / np.clip(expert_prior.sum(), 1e-12, None)
+    return expert_prior
+
+
+class MoEGatingNetwork(nn.Module):
+    """
+    Logit-Adjusted gating network for MoE.
+    """
+    def __init__(self, in_features: int, num_experts: int,
+                 class_counts: Optional[np.ndarray] = None, tau: float = 1.0):
+        super().__init__()
+        self.gate = nn.Linear(in_features, num_experts)
+        self.tau = float(tau)
+        self.register_buffer("log_prior", None, persistent=False)
+        if class_counts is not None:
+            expert_prior = _expert_priors_from_counts(class_counts, num_experts)
+            self.log_prior = torch.tensor(np.log(expert_prior + 1e-12), dtype=torch.float32)
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits = self.gate(x)
+        if self.log_prior is not None and self.tau > 0:
+            logits = logits - self.tau * self.log_prior
+        probs = self.softmax(logits)
+        return probs, logits
+
+
+class MoEClassifier(nn.Module):
+    """
+    Mixture of Experts classifier for stage-2.
+    """
+    def __init__(self, in_features: int, num_classes: int, num_experts: int = 3,
+                 class_counts: Optional[np.ndarray] = None, gate_tau: float = 1.0, la_tau: float = 1.0):
+        super().__init__()
+        self.num_experts = int(num_experts)
+        self.num_classes = int(num_classes)
+        if self.num_experts != 3:
+            raise ValueError("MoEClassifier expects num_experts=3 for (generalist, tail, conservative).")
+
+        self.gate = MoEGatingNetwork(in_features, self.num_experts,
+                                     class_counts=class_counts, tau=gate_tau)
+
+        margins = None
+        if class_counts is not None:
+            margins = ldam_margins_from_counts(class_counts)
+
+        expert2 = LogitAdjustedLinear(in_features, num_classes, class_counts, tau=la_tau) \
+            if class_counts is not None else nn.Linear(in_features, num_classes)
+
+        self.experts = nn.ModuleList([
+            nn.Linear(in_features, num_classes),                           # Expert 0: Generalist
+            CosineMarginClassifier(in_features, num_classes, scale=30.0, margins=margins),  # Expert 1: Tail
+            expert2                                                        # Expert 2: Conservative
+        ])
+
+        for exp in self.experts:
+            if isinstance(exp, nn.Linear):
+                init_model_for_imbalanced_linear(exp, class_counts)
+
+    def forward(self, x: torch.Tensor, targets: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        gate_probs, gate_logits = self.gate(x)
+
+        expert_outputs = []
+        for expert in self.experts:
+            if isinstance(expert, CosineMarginClassifier):
+                out = expert(x, targets)
+            else:
+                out = expert(x)
+            expert_outputs.append(out.unsqueeze(1))
+
+        expert_outputs = torch.cat(expert_outputs, dim=1)
+        final_logits = torch.sum(gate_probs.unsqueeze(-1) * expert_outputs, dim=1)
+
+        aux = {
+            "gate_probs": gate_probs,
+            "gate_logits": gate_logits,
+        }
+        return final_logits, aux
+
+
+def _call_classifier(classifier: nn.Module, features: torch.Tensor,
+                     targets: Optional[torch.Tensor] = None) -> Any:
+    if targets is None:
+        return classifier(features)
+    if isinstance(classifier, (MoEClassifier, CosineMarginClassifier)):
+        return classifier(features, targets)
+    return classifier(features)
+
+
 class LearnableWeightScaling(nn.Module):
     """
     Learnable Weight Scaling (LWS).
@@ -237,11 +359,14 @@ class LearnableWeightScaling(nn.Module):
 
 def swap_classifier(model: nn.Module, head: str,
                     class_counts: Optional[np.ndarray] = None,
+                    in_features: Optional[int] = None,
+                    num_classes: Optional[int] = None,
                     *, scale: float = 30.0, tau: float = 1.0,
-                    ldam_power: float = 0.25, ldam_max_m: float = 0.5) -> nn.Module:
+                    ldam_power: float = 0.25, ldam_max_m: float = 0.5,
+                    num_experts: int = 3, gate_tau: float = 1.0) -> nn.Module:
     """
     Replace `model.classifier` with an advanced head.
-    head in {"linear", "cosine", "cosine_ldam", "logit_adjust"}
+    head in {"linear", "cosine", "cosine_ldam", "logit_adjust", "moe"}
     """
     if not hasattr(model, "classifier"):
         raise AttributeError("Model has no attribute 'classifier'")
@@ -250,8 +375,8 @@ def swap_classifier(model: nn.Module, head: str,
         in_features = old.in_features
         num_classes = old.out_features
     else:
-        # Try to deduce from a dummy input if possible
-        raise TypeError("swap_classifier expects a linear classifier attribute on the model")
+        if in_features is None or num_classes is None:
+            raise TypeError("swap_classifier expects a linear classifier attribute on the model")
 
     if head == "linear":
         new_head = nn.Linear(in_features, num_classes, bias=True)
@@ -266,10 +391,24 @@ def swap_classifier(model: nn.Module, head: str,
         if class_counts is None:
             raise ValueError("logit_adjust requires class_counts")
         new_head = LogitAdjustedLinear(in_features, num_classes, class_counts, tau=tau, bias=True)
+    elif head == "moe":
+        if class_counts is None:
+            raise ValueError("moe requires class_counts")
+        new_head = MoEClassifier(
+            in_features, num_classes,
+            num_experts=num_experts,
+            class_counts=class_counts,
+            gate_tau=gate_tau,
+            la_tau=tau
+        )
     else:
         raise ValueError(f"Unknown head: {head}")
 
-    model.classifier = new_head  # type: ignore
+    try:
+        device = next(old.parameters()).device
+    except StopIteration:
+        device = next(model.parameters()).device
+    model.classifier = new_head.to(device)  # type: ignore
     return model
 
 
@@ -481,14 +620,14 @@ class ConvNetADSB(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
         self.classifier = nn.Linear(350, num_classes)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: [B, 2, T]
         features = self.features(x)
         if self.attention is not None:
             features = self.attention(features)
         pooled = self.global_pool(features).view(features.size(0), -1)
         pooled = self.dropout(pooled)
-        logits = self.classifier(pooled)
+        logits = _call_classifier(self.classifier, pooled, y)
         if isinstance(logits, tuple):
             logits, aux = logits
             if isinstance(aux, dict):
@@ -554,7 +693,7 @@ class ResNet1D(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         h = self.stem(x)
         h = self.layer1(h)
         h = self.layer2(h)
@@ -564,7 +703,7 @@ class ResNet1D(nn.Module):
             h = self.attention(h)
         pooled = self.global_pool(h).squeeze(-1)
         pooled = self.dropout(pooled)
-        logits = self.classifier(pooled)
+        logits = _call_classifier(self.classifier, pooled, y)
         if isinstance(logits, tuple):
             logits, aux = logits
             if isinstance(aux, dict):
@@ -615,14 +754,14 @@ class DilatedTCN(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         h = self.proj(x)
         h = self.blocks(h)
         if self.attention is not None:
             h = self.attention(h)
         pooled = self.global_pool(h).squeeze(-1)
         pooled = self.dropout(pooled)
-        logits = self.classifier(pooled)
+        logits = _call_classifier(self.classifier, pooled, y)
         if isinstance(logits, tuple):
             logits, aux = logits
             if isinstance(aux, dict):

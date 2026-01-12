@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 import warnings
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence, Dict, Union, Callable, List, Tuple
+from typing import Optional, Sequence, Dict, Union, Callable, List, Tuple, Any
 from dataclasses import dataclass
 
 import numpy as np
@@ -1173,6 +1173,53 @@ class CombinedLoss(BaseLoss):
             component_loss = loss_fn(logits, targets, **kwargs)
             total_loss = total_loss + self.weights[name] * component_loss
         return total_loss
+
+
+class MoELoss(BaseLoss):
+    """
+    Combined loss for MoE: base classification loss + load balancing loss.
+    """
+
+    def __init__(self, base_criterion: nn.Module, w_balance: float = 0.1,
+                 num_experts: int = 3, **kwargs):
+        super().__init__(**kwargs)
+        self.base_criterion = base_criterion
+        self.w_balance = float(w_balance)
+        self.num_experts = int(num_experts)
+
+    @staticmethod
+    def _extract_gate_probs(logits_tuple: Any, feature: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        gate_probs = None
+        logits = logits_tuple
+
+        if isinstance(logits_tuple, tuple):
+            logits = logits_tuple[0]
+            if len(logits_tuple) > 1:
+                gate_info = logits_tuple[1]
+                if isinstance(gate_info, dict):
+                    gate_probs = gate_info.get("gate_probs")
+                else:
+                    gate_probs = gate_info
+
+        if gate_probs is None and isinstance(feature, dict):
+            if "gate_probs" in feature:
+                gate_probs = feature["gate_probs"]
+
+        return logits, gate_probs
+
+    def forward(self, logits_tuple: Any, targets: torch.Tensor, **kwargs) -> torch.Tensor:
+        feature = kwargs.get("feature")
+        logits, gate_probs = self._extract_gate_probs(logits_tuple, feature)
+
+        cls_loss = self.base_criterion(logits, targets)
+        if gate_probs is None:
+            return cls_loss
+
+        expert_usage = gate_probs.mean(dim=0)
+        target_usage = torch.full_like(expert_usage, 1.0 / max(1, self.num_experts))
+        balance_loss = F.mse_loss(expert_usage, target_usage)
+
+        return cls_loss + self.w_balance * balance_loss
 
 
 # =============================================================================

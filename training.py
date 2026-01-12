@@ -754,9 +754,19 @@ def build_criterion(loss_name: str, cfg: DictConfig, class_counts):
 # Part 6: 训练与评估循环 (原 train_eval.py)
 # =============================================================================
 
-def _forward_model(model: nn.Module, x: torch.Tensor):
+def _forward_model(model: nn.Module, x: torch.Tensor, y: Optional[torch.Tensor] = None):
     """模型前向传播，统一处理输出格式"""
-    out = model(x)
+    if y is not None:
+        try:
+            out = model(x, y=y)
+        except TypeError as exc:
+            msg = str(exc)
+            if "positional argument" in msg or "unexpected keyword" in msg:
+                out = model(x)
+            else:
+                raise
+    else:
+        out = model(x)
     if isinstance(out, tuple) and len(out) >= 1:
         logits = out[0]
         features = out[1] if len(out) > 1 else None
@@ -800,7 +810,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, logger,
             scaler = scaler or torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
             with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                logits, features = _forward_model(model, x)
+                logits, features = _forward_model(model, x, y)
                 loss = _compute_loss(criterion, logits, y, features)
             scaler.scale(loss).backward()
             if grad_clip > 0:
@@ -809,7 +819,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, logger,
             scaler.step(optimizer)
             scaler.update()
         else:
-            logits, features = _forward_model(model, x)
+            logits, features = _forward_model(model, x, y)
             loss = _compute_loss(criterion, logits, y, features)
             loss.backward()
             if grad_clip > 0:
