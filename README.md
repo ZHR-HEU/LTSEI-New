@@ -1,8 +1,6 @@
 
 
-本文档以“实验目标 + 干预位置”为主线组织实验：先建立基准，再按“损失/先验/采样/分类器再平衡/后处理”进行对比，最后给出 MoE-LTSEI 及消融与鲁棒性实验。
-
-**MoE-LTSEI** 是本文提出的方法。
+本文档以"实验目标 + 干预位置"为主线组织实验：先建立基准，再按"损失/先验/采样/分类器再平衡/后处理"进行对比。
 
 ---
 
@@ -12,8 +10,7 @@
 |----------|------|------|
 | **基准与问题确认** | 建立 Baseline，确认长尾影响 | 2 |
 | **方法对比（按干预位置）** | 对比主流长尾策略 | 3 |
-| **MoE-LTSEI (Ours)** | 本文方法完整配置 | 4 |
-| **消融与鲁棒性** | 验证组件贡献与稳健性 | 5 |
+| **消融与鲁棒性** | 验证组件贡献与稳健性 | 4 |
 
 ---
 
@@ -48,7 +45,7 @@ python main.py loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 
 #### Focal Loss
 > Lin et al., "Focal Loss for Dense Object Detection", **ICCV 2017**
-> 
+>
 > 通过 $(1-p_t)^\gamma$ 调制因子聚焦难分类样本
 
 ```bash
@@ -57,7 +54,7 @@ python main.py loss.name=FocalLoss loss.focal_gamma=2.0 sampling.name=none stage
 
 #### Class-Balanced Loss (CB)
 > Cui et al., "Class-Balanced Loss Based on Effective Number of Samples", **CVPR 2019**
-> 
+>
 > 基于有效样本数 $E_n = (1-\beta^n)/(1-\beta)$ 计算类别权重
 
 ```bash
@@ -66,8 +63,8 @@ python main.py loss.name=ClassBalancedLoss loss.cb_beta=0.9999 sampling.name=non
 
 #### LDAM (Label-Distribution-Aware Margin)
 > Cao et al., "Learning Imbalanced Datasets with Label-Distribution-Aware Margin Loss", **NeurIPS 2019**
-> 
-> 为少数类设置更大边界 $\Delta_j = C / n_j^{1/4}$  
+>
+> 为少数类设置更大边界 $\Delta_j = C / n_j^{1/4}$
 > 说明：`ldam_reweight_power=0` 等效关闭 DRW
 
 ```bash
@@ -87,7 +84,7 @@ python main.py loss.name=LDAMLoss +loss.ldam_max_margin=0.5 +loss.ldam_scale=1.0
 
 #### Balanced Softmax
 > Ren et al., "Balanced Meta-Softmax for Long-Tailed Visual Recognition", **NeurIPS 2020**
-> 
+>
 > Logits 加入类别先验 $\tilde{z}_c = z_c + \log \pi_c$
 
 ```bash
@@ -96,8 +93,8 @@ python main.py loss.name=BalancedSoftmaxLoss sampling.name=none stage2.enabled=f
 
 #### Logit Adjustment (LA)
 > Menon et al., "Long-tail Learning via Logit Adjustment", **ICLR 2021**
-> 
-> 可调强度的先验调整 $\tilde{z}_c = z_c + \tau \log \pi_c$  
+>
+> 可调强度的先验调整 $\tilde{z}_c = z_c + \tau \log \pi_c$
 > 注意：避免与模型头中的 Logit-Adjustment 同时启用
 
 ```bash
@@ -109,7 +106,7 @@ python main.py loss.name=LogitAdjustmentLoss +loss.logit_tau=1.0 sampling.name=n
 ### 3.3 数据采样级 (Re-sampling)
 
 #### 逆频率采样 (Inverse Frequency)
-> 经典重采样方法，采样概率 $p_c \propto 1/n_c$  
+> 经典重采样方法，采样概率 $p_c \propto 1/n_c$
 > 参考：Cui et al., **CVPR 2019**（Class-Balanced Loss 作为重采样/重加权基线）
 
 ```bash
@@ -117,8 +114,8 @@ python main.py loss.name=CrossEntropy sampling.name=inv_freq stage2.enabled=fals
 ```
 
 #### 类别均匀采样 (Class-Uniform)
-> 每个类别采样概率相等  
-> 参考：Kang et al., **ICLR 2020**（cRT 的 class-balanced sampling）；  
+> 每个类别采样概率相等
+> 参考：Kang et al., **ICLR 2020**（cRT 的 class-balanced sampling）；
 > Yang et al., **NeurIPS 2023**（How Re-sampling Helps for Long-Tail Learning?）
 
 ```bash
@@ -126,7 +123,7 @@ python main.py loss.name=CrossEntropy sampling.name=class_uniform stage2.enabled
 ```
 
 #### 平方根采样 (Square-Root)
-> 采样概率 $p_c \propto 1/\sqrt{n_c}$，介于原始分布与均匀分布之间  
+> 采样概率 $p_c \propto 1/\sqrt{n_c}$，介于原始分布与均匀分布之间
 > 参考：Gupta et al., **CVPR 2019**（LVIS Repeat-Factor Sampling 思路）
 
 ```bash
@@ -139,7 +136,7 @@ python main.py loss.name=CrossEntropy sampling.name=sqrt stage2.enabled=false
 
 #### cRT (Classifier Re-Training)
 > Kang et al., "Decoupling Representation and Classifier for Long-Tailed Recognition", **ICLR 2020**
-> 
+>
 > Stage-1: 标准训练学习表征；Stage-2: 冻结 backbone，平衡采样重训分类器
 
 ```bash
@@ -173,183 +170,47 @@ python main.py loss.name=CrossEntropy sampling.name=none stage2.enabled=false st
 
 ---
 
-## 4. MoE-LTSEI (Ours) - 完整方法
+## 4. 消融与鲁棒性 (Ablation & Robustness)
 
-### 4.1 完整配置
+### 4.1 Backbone 对比
 
-**Stage-1**: 标准 CE 训练，学习通用表征
-
-**Stage-2**: MoE 分类器头 + 自适应边界损失 + 门控监督
-
-```bash
-python main.py \
-  model.name=ConvNetADSB \
-  model.dropout=0.1 \
-  model.use_attention=true \
-  loss.name=CrossEntropy \
-  sampling.name=none \
-  training.epochs=300 \
-  training.lr=0.1 \
-  training.optimizer=SGD \
-  stage2.enabled=true \
-  stage2.mode=moe_ltsei \
-  stage2.epochs=100 \
-  stage2.lr=0.1 \
-  stage2.optimizer=SGD \
-  stage2.loss=MoELTSEILoss \
-  stage2.moe.num_experts=3 \
-  stage2.moe.gate_hidden=128 \
-  stage2.moe.gate_dropout=0.1 \
-  stage2.moe.normalize_features=true \
-  stage2.moe_loss.scale=30.0 \
-  stage2.moe_loss.beta=0.999 \
-  stage2.moe_loss.margin_m0=0.35 \
-  stage2.moe_loss.margin_m1=0.2 \
-  stage2.moe_loss.margin_gamma=0.5 \
-  stage2.moe_loss.diff_gamma=2.0 \
-  stage2.moe_loss.diff_alpha=1.0 \
-  stage2.moe_loss.lambda_gate=1.0 \
-  stage2.moe_loss.lambda_lb=0.0 \
-  stage2.sampler=progressive_power \
-  stage2.alpha_start=1.0 \
-  stage2.alpha_end=0.0 \
-  stage2.freeze_bn=true \
-  stage2.warmup_epochs=5 \
-  data.imbalance_ratio=100
-```
-
-### 4.2 简洁版本 (使用默认值)
-
-```bash
-python main.py loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe_loss.scale=30.0 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true
-```
-
----
-
-## 5. 消融与鲁棒性 (Ablation & Robustness)
-
-验证 MoE-LTSEI 各组件的贡献。
-
-### 5.1 Backbone 对比
-
-#### 单专家: ConvNetADSB
+#### ConvNetADSB
 ```bash
 python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 ```
 
-#### 单专家: ResNet1D
+#### ResNet1D
 ```bash
 python main.py model.name=ResNet1D loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 ```
 
-#### 单专家: DilatedTCN
+#### DilatedTCN
 ```bash
 python main.py model.name=DilatedTCN loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 ```
 
-#### 单专家: FrequencyDomainExpert
-```bash
-python main.py model.name=FrequencyDomainExpert loss.name=CrossEntropy sampling.name=none stage2.enabled=false
-```
-
-#### MoE 结构 (无长尾处理)
-```bash
-python main.py model.name=MixtureOfExpertsConvNet loss.name=CrossEntropy sampling.name=none stage2.enabled=false
-```
-
 ---
 
-### 5.2 损失函数消融
-
-#### MoE + 标准 CE (无边界)
-```bash
-python main.py model.name=MixtureOfExpertsConvNet loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=crt stage2.loss=CrossEntropy stage2.sampler=class_uniform stage2.freeze_bn=true stage2.epochs=100 stage2.lr=0.1
-```
-
-#### MoE + Class-Balanced Loss
-```bash
-python main.py model.name=MixtureOfExpertsConvNet loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=crt stage2.loss=ClassBalancedLoss stage2.sampler=class_uniform stage2.freeze_bn=true stage2.epochs=100 stage2.lr=0.1
-```
-
-#### MoE + Cost-Sensitive CE
-```bash
-python main.py model.name=MixtureOfExpertsConvNet loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=crt stage2.loss=CostSensitiveCE stage2.cost_strategy=auto stage2.sampler=progressive_power stage2.alpha_start=1.0 stage2.alpha_end=0.0 stage2.freeze_bn=true stage2.epochs=100 stage2.lr=0.1
-```
-
----
-
-### 5.3 MoE-LTSEI 组件消融
-
-#### MoE-LTSEI w/o Gate Loss (λ_gate=0)
-> 移除门控监督损失
-
-```bash
-python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe.gate_hidden=128 stage2.moe_loss.scale=30.0 stage2.moe_loss.beta=0.999 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=0.0 stage2.moe_loss.lambda_lb=0.0 stage2.freeze_bn=true stage2.warmup_epochs=5
-```
-
-#### MoE-LTSEI w/o Adaptive Margin (margin_m0=0)
-> 移除自适应边界
-
-```bash
-python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe.gate_hidden=128 stage2.moe_loss.scale=30.0 stage2.moe_loss.beta=0.999 stage2.moe_loss.margin_m0=0.0 stage2.moe_loss.lambda_gate=1.0 stage2.moe_loss.lambda_lb=0.0 stage2.freeze_bn=true stage2.warmup_epochs=5
-```
-
-#### MoE-LTSEI w/o Difficulty Weighting (diff_gamma=0, diff_alpha=0)
-> 移除难度加权
-
-```bash
-python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe.gate_hidden=128 stage2.moe_loss.scale=30.0 stage2.moe_loss.beta=0.999 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.diff_gamma=0.0 stage2.moe_loss.diff_alpha=0.0 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true stage2.warmup_epochs=5
-```
-
-#### MoE-LTSEI with Load Balance (λ_lb=0.01)
-> 添加负载均衡正则化
-
-```bash
-python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe.gate_hidden=128 stage2.moe_loss.scale=30.0 stage2.moe_loss.beta=0.999 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.moe_loss.lambda_lb=0.01 stage2.freeze_bn=true stage2.warmup_epochs=5
-```
-
----
-
-### 5.4 专家数量消融
-> 注意：当前 gate loss 仅在 num_experts=3 时生效，2/4 experts 配置下会被忽略。
-
-#### 2 Experts
-```bash
-python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=2 stage2.moe.gate_hidden=128 stage2.moe_loss.scale=30.0 stage2.moe_loss.beta=0.999 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true stage2.warmup_epochs=5
-```
-
-#### 3 Experts (默认)
-```bash
-python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe.gate_hidden=128 stage2.moe_loss.scale=30.0 stage2.moe_loss.beta=0.999 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true stage2.warmup_epochs=5
-```
-
-#### 4 Experts
-```bash
-python main.py model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=4 stage2.moe.gate_hidden=128 stage2.moe_loss.scale=30.0 stage2.moe_loss.beta=0.999 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true stage2.warmup_epochs=5
-```
-
----
-
-### 5.5 不平衡比消融
+### 4.2 不平衡比消融
 
 #### IR = 10
 ```bash
-python main.py data.imbalance_ratio=10 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe_loss.scale=30.0 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true
+python main.py data.imbalance_ratio=10 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 ```
 
 #### IR = 50
 ```bash
-python main.py data.imbalance_ratio=50 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe_loss.scale=30.0 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true
+python main.py data.imbalance_ratio=50 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 ```
 
 #### IR = 100 (默认)
 ```bash
-python main.py data.imbalance_ratio=100 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe_loss.scale=30.0 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true
+python main.py data.imbalance_ratio=100 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 ```
 
 #### IR = 200
 ```bash
-python main.py data.imbalance_ratio=200 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=true stage2.mode=moe_ltsei stage2.epochs=100 stage2.lr=0.1 stage2.loss=MoELTSEILoss stage2.moe.num_experts=3 stage2.moe_loss.scale=30.0 stage2.moe_loss.margin_m0=0.35 stage2.moe_loss.lambda_gate=1.0 stage2.freeze_bn=true
+python main.py data.imbalance_ratio=200 model.name=ConvNetADSB loss.name=CrossEntropy sampling.name=none stage2.enabled=false
 ```
 
 ---
@@ -374,23 +235,11 @@ python main.py data.imbalance_ratio=200 model.name=ConvNetADSB loss.name=CrossEn
 | 参数 | 说明 | 示例 |
 |------|------|------|
 | `stage2.enabled` | 是否启用 Stage-2 | true, false |
-| `stage2.mode` | 模式 | crt, lws, finetune, moe_ltsei |
+| `stage2.mode` | 模式 | crt, lws, finetune |
 | `stage2.epochs` | Stage-2 训练轮次 | 50, 100 |
 | `stage2.lr` | Stage-2 学习率 | 0.01, 0.1 |
 | `stage2.lws_init_scale` | LWS 缩放初值 | 1.0 |
 | `stage2.freeze_bn` | 是否冻结 BN | true, false |
-
-### D. MoE-LTSEI 专用参数
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `stage2.moe.num_experts` | 专家数量 | 3 |
-| `stage2.moe.gate_hidden` | 门控隐藏层维度 | 128 |
-| `stage2.moe_loss.scale` | Logit 缩放因子 | 30.0 |
-| `stage2.moe_loss.beta` | 有效样本数 β | 0.999 |
-| `stage2.moe_loss.margin_m0` | 基础边界 | 0.35 |
-| `stage2.moe_loss.diff_gamma` | 难度调制 γ | 2.0 |
-| `stage2.moe_loss.lambda_gate` | 门控损失权重 | 1.0 |
-| `stage2.moe_loss.lambda_lb` | 负载均衡权重 | 0.0 |
 
 ---
 
