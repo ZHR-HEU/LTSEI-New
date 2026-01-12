@@ -1017,196 +1017,6 @@ class CostSensitiveFocal(BaseLoss):
 # Advanced and Composite Losses
 # =============================================================================
 
-class MoELTSEILoss(BaseLoss):
-    """
-    Adaptive margin loss for MoE-LTSEI.
-    Expects gate_probs in feature dict for gate/load-balance regularizers.
-    """
-
-    def __init__(
-        self,
-        class_counts: Union[Sequence[int], np.ndarray, torch.Tensor],
-        num_experts: int = 3,
-        scale: float = 30.0,
-        beta: float = 0.999,
-        diff_gamma: float = 2.0,
-        diff_alpha: float = 1.0,
-        margin_type: str = "effective",
-        margin_m0: float = 0.35,
-        margin_m1: float = 0.2,
-        margin_gamma: float = 0.5,
-        margin_max: Optional[float] = None,
-        label_smoothing: float = 0.0,
-        lambda_gate: float = 1.0,
-        lambda_lb: float = 0.0,
-        gate_target_smoothing: float = 0.0,
-        group_strategy: str = "auto",
-        many_thresh: int = 100,
-        few_thresh: int = 20,
-        q_low: float = 1 / 3,
-        q_high: float = 2 / 3,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.class_counts = np.asarray(class_counts).astype(np.int64).reshape(-1)
-        self.num_classes = int(self.class_counts.size)
-        self.num_experts = int(num_experts)
-        self.scale = float(scale)
-        self.beta = float(beta)
-        self.diff_gamma = float(diff_gamma)
-        self.diff_alpha = float(diff_alpha)
-        self.margin_type = str(margin_type).lower()
-        self.margin_m0 = float(margin_m0)
-        self.margin_m1 = float(margin_m1)
-        self.margin_gamma = float(margin_gamma)
-        self.margin_max = float(margin_max) if margin_max is not None else None
-        self.label_smoothing = float(label_smoothing)
-        self.lambda_gate = float(lambda_gate)
-        self.lambda_lb = float(lambda_lb)
-        self.gate_target_smoothing = float(gate_target_smoothing)
-        self.group_strategy = str(group_strategy).lower()
-        self.many_thresh = int(many_thresh)
-        self.few_thresh = int(few_thresh)
-        self.q_low = float(q_low)
-        self.q_high = float(q_high)
-
-        self._w_cache: Optional[torch.Tensor] = None
-        self._w_device = None
-        self._m_cache: Optional[torch.Tensor] = None
-        self._m_device = None
-        self._group_map = self._build_group_map()
-
-    def _build_group_map(self) -> torch.Tensor:
-        counts = self.class_counts
-        if counts.size == 0:
-            return torch.zeros(0, dtype=torch.long)
-
-        if self.group_strategy == "absolute":
-            many = np.where(counts >= self.many_thresh)[0]
-            few = np.where(counts <= self.few_thresh)[0]
-        elif self.group_strategy == "quantile":
-            lo = np.quantile(counts, self.q_low)
-            hi = np.quantile(counts, self.q_high)
-            many = np.where(counts >= hi)[0]
-            few = np.where(counts <= lo)[0]
-        else:
-            if counts.max() >= self.many_thresh:
-                many = np.where(counts >= self.many_thresh)[0]
-                few = np.where(counts <= self.few_thresh)[0]
-            else:
-                lo = np.quantile(counts, self.q_low)
-                hi = np.quantile(counts, self.q_high)
-                many = np.where(counts >= hi)[0]
-                few = np.where(counts <= lo)[0]
-
-        group_map = np.full(self.num_classes, 1, dtype=np.int64)
-        group_map[many] = 0
-        group_map[few] = 2
-        return torch.tensor(group_map, dtype=torch.long)
-
-    def _get_class_weights(self, device) -> torch.Tensor:
-        if self._w_cache is None or self._w_device != device:
-            self._w_cache = WeightComputer.effective_number_weights(
-                self.class_counts, beta=self.beta, device=device
-            )
-            self._w_device = device
-        return self._w_cache
-
-    def _get_margins(self, device) -> torch.Tensor:
-        if self._m_cache is None or self._m_device != device:
-            counts = TensorUtils.as_tensor1d(self.class_counts, device=device, dtype=torch.float)
-            if self.margin_type == "log":
-                n_max = counts.max().clamp_min(1.0)
-                ratio = 1.0 - torch.log1p(counts) / torch.log1p(n_max)
-                margins = self.margin_m0 + self.margin_m1 * torch.pow(ratio.clamp_min(0.0), self.margin_gamma)
-            else:
-                beta_t = torch.tensor(self.beta, device=device, dtype=counts.dtype)
-                effective = (1.0 - torch.pow(beta_t, counts.clamp_min(1.0))) / (1.0 - beta_t + 1e-12)
-                e_max = effective.max().clamp_min(1.0)
-                margins = self.margin_m0 * torch.pow(e_max / effective.clamp_min(1e-12), self.margin_gamma)
-            if self.margin_max is not None:
-                margins = margins.clamp(max=self.margin_max)
-            self._m_cache = margins
-            self._m_device = device
-        return self._m_cache
-
-    def _cross_entropy_smooth(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        log_probs = F.log_softmax(logits, dim=-1)
-        if self.label_smoothing <= 0:
-            return F.nll_loss(log_probs, targets, reduction='none')
-
-        num_classes = logits.size(-1)
-        smooth = self.label_smoothing
-        true_dist = torch.zeros_like(log_probs)
-        true_dist.fill_(smooth / max(1, num_classes))
-        true_dist.scatter_(1, targets.view(-1, 1), 1.0 - smooth + smooth / max(1, num_classes))
-        return -(true_dist * log_probs).sum(dim=-1)
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor, **kwargs) -> torch.Tensor:
-        targets = TensorUtils.to_1d_long(targets)
-        device = logits.device
-
-        margins = self._get_margins(device)
-        if margins.numel() == logits.size(-1):
-            margin_values = margins.gather(0, targets)
-            logits_adj = logits.clone()
-            batch_idx = torch.arange(logits.size(0), device=device)
-            logits_adj[batch_idx, targets] -= self.scale * margin_values
-        else:
-            logits_adj = logits
-
-        ce_loss = self._cross_entropy_smooth(logits_adj, targets)
-
-        probs = torch.softmax(logits_adj, dim=-1)
-        p_y = probs.gather(1, targets.view(-1, 1)).squeeze(1)
-        probs_other = probs.clone()
-        probs_other.scatter_(1, targets.view(-1, 1), 0)
-        p_max_other = probs_other.max(dim=1).values
-
-        w_diff = torch.pow(1.0 - p_y, self.diff_gamma)
-        if self.diff_alpha != 0:
-            # 数值保护：限制exp的输入和输出，防止溢出导致NaN
-            exp_input = (self.diff_alpha * p_max_other).clamp(max=5.0)
-            exp_term = torch.exp(exp_input).clamp(max=50.0)
-            w_diff = w_diff * exp_term
-
-        w_cls = self._get_class_weights(device)
-        if w_cls.numel() == logits.size(-1):
-            w_y = w_cls.gather(0, targets)
-        else:
-            w_y = torch.ones_like(p_y)
-
-        loss_cls = w_y * w_diff * ce_loss
-        loss_cls = self._apply_reduction(loss_cls)
-
-        feature = kwargs.get("feature", None)
-        gate_loss = torch.zeros((), device=device, dtype=logits.dtype)
-        lb_loss = torch.zeros((), device=device, dtype=logits.dtype)
-
-        if self.training and isinstance(feature, dict) and "gate_probs" in feature:
-            gate_probs = feature["gate_probs"]
-            if self.lambda_gate > 0 and self.num_experts == gate_probs.size(-1) and gate_probs.size(0) > 0:
-                group_map = self._group_map.to(device)
-                if group_map.numel() == logits.size(-1) and self.num_experts == 3:
-                    group_idx = group_map.gather(0, targets)
-                    q = F.one_hot(group_idx, num_classes=self.num_experts).float()
-                    if self.gate_target_smoothing > 0:
-                        smooth = self.gate_target_smoothing
-                        q = (1 - smooth) * q + smooth / float(self.num_experts)
-                    gate_loss = F.kl_div((gate_probs + self.eps).log(), q, reduction='batchmean')
-
-            if self.lambda_lb > 0 and gate_probs.size(0) > 0 and gate_probs.size(-1) == self.num_experts:
-                hard = gate_probs.argmax(dim=1)
-                counts = torch.zeros(self.num_experts, device=device, dtype=torch.float)
-                counts.scatter_add_(0, hard, torch.ones_like(hard, dtype=torch.float))
-                f_m = counts / counts.sum().clamp_min(1.0)
-                p_m = gate_probs.mean(dim=0)
-                lb_loss = self.num_experts * (f_m * p_m).sum()
-
-        total = loss_cls + self.lambda_gate * gate_loss + self.lambda_lb * lb_loss
-        return total
-
-
 class LabelSmoothingLoss(BaseLoss):
     """Label smoothing with class-aware smoothing rates."""
 
@@ -1429,7 +1239,6 @@ LOSS_REGISTRY = {
     'LOS': LOSLoss,
     'CombinedLoss': CombinedLoss,
     'KnowledgeDistillationLoss': KnowledgeDistillationLoss,
-    'MoELTSEILoss': MoELTSEILoss,
 }
 
 # Losses that require class counts
@@ -1439,7 +1248,6 @@ LOSSES_REQUIRING_COUNTS = {
     'BalancedSoftmaxLoss',
     'LogitAdjustmentLoss',
     'ProgressiveLoss',
-    'MoELTSEILoss',
 }
 
 
@@ -1488,7 +1296,6 @@ def get_loss_info() -> Dict[str, Dict[str, str]]:
             'LOS': 'Label Over-Smoothing (ICLR 2025) for classifier re-training',
             'CombinedLoss': 'Combination of multiple loss functions',
             'KnowledgeDistillationLoss': 'Knowledge distillation with temperature scaling',
-            'MoELTSEILoss': 'Adaptive margin loss with MoE gate/load-balance regularizers',
         }
     }
 

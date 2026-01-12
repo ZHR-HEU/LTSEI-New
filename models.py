@@ -6,14 +6,13 @@ This module contains various neural network architectures and classification hea
 specifically designed for handling imbalanced datasets, with a focus on signal
 processing tasks (e.g., I/Q baseband).
 
-What’s new vs. baseline:
+What's new vs. baseline:
 - Bias-free Conv1d when followed by normalization (waste-free with BN/GN/LN)
 - Normalization factory (auto BN→GN/LN fallback)
 - Cosine-margin head (LDAM-ready) and Logit-Adjusted linear head
 - Robust frequency-domain feature builder (RI / Mag-Phase / Log-Power)
-- Mixture-of-Experts load-balance regularizer
 - Cleaner initialization utilities with log-prior bias option
-- Minor API helpers: swap_classifier(), moe_load_balance_loss(), etc.
+- Minor API helpers: swap_classifier(), etc.
 
 Dependencies: torch, numpy
 Author: Enhanced Implementation
@@ -234,80 +233,6 @@ class LearnableWeightScaling(nn.Module):
         scale = torch.exp(self.log_scale)
         weight = self.weight * scale.unsqueeze(1)
         return F.linear(x, weight, self.bias)
-
-
-class MoEClassifierHead(nn.Module):
-    """
-    Mixture-of-Experts classifier head for decoupled training.
-    Uses cosine classifiers as experts and a lightweight MLP gate.
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        num_classes: int,
-        num_experts: int = 3,
-        gate_hidden: int = 128,
-        gate_dropout: float = 0.1,
-        gate_noise: float = 0.0,
-        scale: float = 30.0,
-        normalize_features: bool = True,
-    ):
-        super().__init__()
-        self.in_features = int(in_features)
-        self.num_classes = int(num_classes)
-        self.num_experts = int(num_experts)
-        self.gate_noise = float(gate_noise)
-        self.scale = float(scale)
-        self.normalize_features = bool(normalize_features)
-
-        self.experts = nn.ModuleList([
-            CosineMarginClassifier(self.in_features, self.num_classes, scale=self.scale, margins=None)
-            for _ in range(self.num_experts)
-        ])
-
-        self.gate_fc1 = nn.Linear(self.in_features, gate_hidden)
-        self.gate_act = nn.ReLU(inplace=True)
-        self.gate_drop = nn.Dropout(gate_dropout)
-        self.gate_fc2 = nn.Linear(gate_hidden, self.num_experts)
-        self.gate_noise_fc = nn.Linear(gate_hidden, self.num_experts) if self.gate_noise > 0 else None
-
-        self._init_gate()
-
-    def _init_gate(self):
-        nn.init.kaiming_normal_(self.gate_fc1.weight, nonlinearity='relu')
-        nn.init.normal_(self.gate_fc2.weight, 0, 0.01)
-        if self.gate_fc1.bias is not None:
-            nn.init.constant_(self.gate_fc1.bias, 0)
-        if self.gate_fc2.bias is not None:
-            nn.init.constant_(self.gate_fc2.bias, 0)
-        if self.gate_noise_fc is not None:
-            nn.init.normal_(self.gate_noise_fc.weight, 0, 0.01)
-            if self.gate_noise_fc.bias is not None:
-                nn.init.constant_(self.gate_noise_fc.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        if self.normalize_features:
-            x = F.normalize(x, dim=-1)
-
-        h = self.gate_act(self.gate_fc1(x))
-        h = self.gate_drop(h)
-        gate_logits = self.gate_fc2(h)
-
-        if self.training and self.gate_noise_fc is not None and self.gate_noise > 0:
-            noise_scale = F.softplus(self.gate_noise_fc(h)) * self.gate_noise
-            gate_logits = gate_logits + torch.randn_like(gate_logits) * noise_scale
-
-        gate_probs = torch.softmax(gate_logits, dim=-1)
-
-        expert_logits = torch.stack([expert(x) for expert in self.experts], dim=1)  # [B, E, C]
-        logits = (gate_probs.unsqueeze(-1) * expert_logits).sum(dim=1)
-
-        aux = {
-            "gate_probs": gate_probs,
-            "gate_logits": gate_logits,
-        }
-        return logits, aux
 
 
 def swap_classifier(model: nn.Module, head: str,
@@ -710,204 +635,6 @@ class DilatedTCN(nn.Module):
 
 
 # =============================================================================
-# Frequency Domain Models (using SpectralFeatures)
-# =============================================================================
-
-class FrequencyDomainExpert(nn.Module):
-    """
-    Frequency domain expert using ConvNetADSB backbone with robust spectral features.
-    Args:
-        num_classes, backbone_dropout, use_attention, spectral_mode, spectral_window, norm_kind
-    """
-    def __init__(self, num_classes: int = 10, backbone_dropout: float = 0.1,
-                 use_attention: bool = False, spectral_mode: str = "powerlog",
-                 spectral_window: Optional[str] = "hann", norm_kind: str = "auto"):
-        super().__init__()
-        self.num_classes = int(num_classes)
-        self.spec = SpectralFeatures(mode=spectral_mode, window=spectral_window)
-        self.backbone = ConvNetADSB(num_classes=num_classes,
-                                    dropout_rate=backbone_dropout,
-                                    use_attention=use_attention,
-                                    norm_kind=norm_kind)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # x: [B, 2, T]
-        feat = self.spec(x)  # [B, 2, F]
-        logits, pooled = self.backbone(feat)
-        return logits, pooled
-
-
-class ResNetFrequencyExpert(nn.Module):
-    """
-    Frequency domain expert using ResNet1D backbone with robust spectral features.
-    """
-    def __init__(self, base: int = 16, num_classes: int = 10, use_attention: bool = False,
-                 spectral_mode: str = "powerlog", spectral_window: Optional[str] = "hann",
-                 norm_kind: str = "auto"):
-        super().__init__()
-        self.spec = SpectralFeatures(mode=spectral_mode, window=spectral_window)
-        self.backbone = ResNet1D(in_ch=2, base=base, num_blocks=(2, 2, 2, 2),
-                                 num_classes=num_classes, use_attention=use_attention,
-                                 norm_kind=norm_kind)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        feat = self.spec(x)
-        logits, pooled = self.backbone(feat)
-        return logits, pooled
-
-
-# =============================================================================
-# Mixture of Experts Models + Load-Balance Regularizer
-# =============================================================================
-
-def moe_load_balance_loss(gate_weights: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Encourage using all experts: maximize entropy of average gate probs.
-    LB = - H(mean_b(gate)) = sum_i p_i log p_i
-    """
-    p = gate_weights.mean(dim=0)  # [E]
-    return (p * (p + eps).log()).sum()
-
-
-class MixtureOfExpertsConvNet(nn.Module):
-    """
-    Mixture of Experts model based on ConvNetADSB + DilatedTCN + Frequency expert.
-    Gating: light conv trunk + MLP -> softmax probs over experts.
-    """
-    def __init__(self, num_classes: int = 10, gate_hidden: int = 64, expert_dropout: float = 0.1,
-                 dropout_rate: Optional[float] = None, use_attention: bool = False, norm_kind: str = "auto"):
-        super().__init__()
-        if dropout_rate is not None:
-            expert_dropout = dropout_rate
-        self.num_classes = int(num_classes)
-        self.num_experts = 3
-
-        # Experts
-        self.expert_conv_time = ConvNetADSB(num_classes=num_classes,
-                                            dropout_rate=expert_dropout,
-                                            use_attention=use_attention,
-                                            norm_kind=norm_kind)
-        self.expert_tcn = DilatedTCN(in_ch=2, ch=64, num_layers=4, num_classes=num_classes,
-                                     dropout_rate=expert_dropout, use_attention=use_attention,
-                                     norm_kind=norm_kind)
-        self.expert_conv_freq = FrequencyDomainExpert(num_classes=num_classes,
-                                                      backbone_dropout=expert_dropout,
-                                                      use_attention=use_attention,
-                                                      spectral_mode="powerlog",
-                                                      spectral_window="hann",
-                                                      norm_kind=norm_kind)
-
-        # Gating network
-        self.gate_stem = nn.Sequential(
-            nn.Conv1d(2, 16, kernel_size=7, stride=2, padding=3, bias=False),
-            Norm1d(16, kind=norm_kind),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(3, stride=2, padding=1),
-            nn.Conv1d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
-            Norm1d(32, kind=norm_kind),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(1)
-        )
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(32, gate_hidden),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(gate_hidden, self.num_experts)
-        )
-
-        self._initialize_gate_weights()
-
-    def _initialize_gate_weights(self):
-        for m in self.gate_stem.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-        for m in self.gate_mlp.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        gate_features = self.gate_stem(x).squeeze(-1)  # [B, 32]
-        gate_logits = self.gate_mlp(gate_features)  # [B, E]
-        gate_weights = torch.softmax(gate_logits, dim=-1)  # [B, E]
-
-        logit1, _ = self.expert_conv_time(x)
-        logit2, _ = self.expert_tcn(x)
-        logit3, _ = self.expert_conv_freq(x)
-
-        logits = (gate_weights[:, 0:1] * logit1 +
-                  gate_weights[:, 1:2] * logit2 +
-                  gate_weights[:, 2:3] * logit3)
-        return logits, gate_weights
-
-
-class MixtureOfExpertsResNet(nn.Module):
-    """
-    Mixture of Experts model based on ResNet1D + DilatedTCN + ResNet frequency expert.
-    """
-    def __init__(self, num_classes: int = 10, gate_hidden: int = 64, expert_dropout: float = 0.1,
-                 dropout_rate: Optional[float] = None, use_attention: bool = False, norm_kind: str = "auto"):
-        super().__init__()
-        if dropout_rate is not None:
-            expert_dropout = dropout_rate
-        self.num_classes = int(num_classes)
-        self.num_experts = 3
-
-        self.expert_time_resnet = ResNet1D(in_ch=2, base=32, num_blocks=(2, 2, 2, 2),
-                                           num_classes=num_classes, dropout_rate=expert_dropout,
-                                           use_attention=use_attention, norm_kind=norm_kind)
-        self.expert_tcn = DilatedTCN(in_ch=2, ch=64, num_layers=4, num_classes=num_classes,
-                                     dropout_rate=expert_dropout, use_attention=use_attention,
-                                     norm_kind=norm_kind)
-        self.expert_freq = ResNetFrequencyExpert(base=16, num_classes=num_classes,
-                                                 use_attention=use_attention, norm_kind=norm_kind)
-
-        self.gate_stem = nn.Sequential(
-            nn.Conv1d(2, 16, kernel_size=7, stride=2, padding=3, bias=False),
-            Norm1d(16, kind=norm_kind),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(3, stride=2, padding=1),
-            nn.Conv1d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
-            Norm1d(32, kind=norm_kind),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool1d(1)
-        )
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(32, gate_hidden),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(gate_hidden, self.num_experts)
-        )
-
-        self._initialize_gate_weights()
-
-    def _initialize_gate_weights(self):
-        for m in self.gate_stem.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-        for m in self.gate_mlp.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        gate_features = self.gate_stem(x).squeeze(-1)
-        gate_logits = self.gate_mlp(gate_features)
-        gate_weights = torch.softmax(gate_logits, dim=-1)
-
-        logit1, _ = self.expert_time_resnet(x)
-        logit2, _ = self.expert_tcn(x)
-        logit3, _ = self.expert_freq(x)
-
-        logits = (gate_weights[:, 0:1] * logit1 +
-                  gate_weights[:, 1:2] * logit2 +
-                  gate_weights[:, 2:3] * logit3)
-        return logits, gate_weights
-
-
-# =============================================================================
 # Model Factory and Registry
 # =============================================================================
 
@@ -916,14 +643,6 @@ MODEL_REGISTRY: Dict[str, Any] = {
     'ConvNetADSB': ConvNetADSB,
     'ResNet1D': ResNet1D,
     'DilatedTCN': DilatedTCN,
-
-    # Frequency domain experts
-    'FrequencyDomainExpert': FrequencyDomainExpert,
-    'ResNetFrequencyExpert': ResNetFrequencyExpert,
-
-    # Mixture of experts models
-    'MixtureOfExpertsConvNet': MixtureOfExpertsConvNet,
-    'MixtureOfExpertsResNet': MixtureOfExpertsResNet,
 
     # Enhanced classifiers (heads)
     'TemperatureScaledClassifier': TemperatureScaledClassifier,
@@ -957,14 +676,6 @@ def get_model_info() -> Dict[str, Dict[str, str]]:
             'ConvNetADSB': 'Deep CNN for ADS-B signal classification (bias-free conv + flexible norm)',
             'ResNet1D': '1D ResNet for signal processing (bias-free conv + flexible norm)',
             'DilatedTCN': 'Dilated TCN (bias-free conv + flexible norm)'
-        },
-        'Frequency Domain': {
-            'FrequencyDomainExpert': 'Frequency expert using ConvNetADSB + robust spectral features',
-            'ResNetFrequencyExpert': 'Frequency expert using ResNet1D + robust spectral features'
-        },
-        'Mixture of Experts': {
-            'MixtureOfExpertsConvNet': 'MoE with Conv/TCN/Freq experts + gating',
-            'MixtureOfExpertsResNet': 'MoE with ResNet/TCN/Freq experts + gating'
         },
         'Enhanced Classifiers': {
             'TemperatureScaledClassifier': 'Classifier with learnable temperature scaling'
@@ -1079,10 +790,7 @@ Examples:
 2) ResNet1D with custom params & attention:
    model = create_model('ResNet1D', num_classes=10, base=64, dropout_rate=0.2, use_attention=True)
 
-3) Mixture of Experts:
-   model = create_model('MixtureOfExpertsConvNet', num_classes=8, gate_hidden=128, use_attention=True)
-
-4) Temperature-scaled classifier:
+3) Temperature-scaled classifier:
    model = create_model('TemperatureScaledClassifier', num_classes=10, in_features=512, initial_temperature=2.0)
 
 5) Enhanced initialization (log-prior bias):
@@ -1098,13 +806,7 @@ Examples:
    # or:
    # swap_classifier(model, head="logit_adjust", class_counts=class_counts, tau=1.2)
 
-7) MoE load-balance regularizer (training step):
-   logits, gate = moe_model(x)
-   ce = F.cross_entropy(logits, y)
-   lb = 5e-3 * moe_load_balance_loss(gate)
-   loss = ce + lb
-
-8) Complexity analysis:
+7) Complexity analysis:
    analysis = analyze_model_complexity(model, input_shape=(2, 1024))
    print(analysis)
 

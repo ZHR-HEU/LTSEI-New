@@ -34,7 +34,7 @@ from omegaconf import DictConfig, OmegaConf
 
 # 数据与模型
 from data import LoaderConfig, build_dataloaders, make_long_tailed_indices, ADSBSignalDataset
-from models import create_model, MoEClassifierHead
+from models import create_model
 from losses import create_loss
 from analysis import ClassificationAnalyzer
 from visualization import visualize_all_results
@@ -676,35 +676,9 @@ def main(cfg: DictConfig):
         print(f"模式: {cfg.stage2.mode}")
 
         base = get_base_model(model)
-        if cfg.stage2.mode == 'moe_ltsei':
-            if hasattr(base, 'classifier') and isinstance(base.classifier, nn.Linear):
-                in_features = base.classifier.in_features
-            else:
-                clf_pairs = find_classifier_layers(base, num_classes)
-                if not clf_pairs:
-                    raise ValueError("[Stage-2] Cannot infer classifier input features for MoE-LTSEI")
-                in_features = clf_pairs[0][1].in_features
-
-            moe_cfg = getattr(cfg.stage2, 'moe', None)
-            moe_loss_cfg = getattr(cfg.stage2, 'moe_loss', None)
-            moe_head = MoEClassifierHead(
-                in_features=in_features,
-                num_classes=num_classes,
-                num_experts=getattr(moe_cfg, 'num_experts', 3) if moe_cfg else 3,
-                gate_hidden=getattr(moe_cfg, 'gate_hidden', 128) if moe_cfg else 128,
-                gate_dropout=getattr(moe_cfg, 'gate_dropout', 0.1) if moe_cfg else 0.1,
-                gate_noise=getattr(moe_cfg, 'gate_noise', 0.0) if moe_cfg else 0.0,
-                scale=getattr(moe_loss_cfg, 'scale', 30.0) if moe_loss_cfg else 30.0,
-                normalize_features=getattr(moe_cfg, 'normalize_features', True) if moe_cfg else True,
-            ).to(device)
-            base.classifier = moe_head
-            print("[Stage-2] MoE-LTSEI: replaced classifier with MoE head")
-            classifier_names = ["classifier"]
-            classifier_layers = []
-        else:
-            clf_pairs = find_classifier_layers(base, num_classes)
-            classifier_names = [n for n, _ in clf_pairs]
-            classifier_layers = [m for _, m in clf_pairs]
+        clf_pairs = find_classifier_layers(base, num_classes)
+        classifier_names = [n for n, _ in clf_pairs]
+        classifier_layers = [m for _, m in clf_pairs]
 
         # 定义stage2参数
         stage2_wd = cfg.stage2.weight_decay if hasattr(cfg.stage2,
@@ -751,7 +725,7 @@ def main(cfg: DictConfig):
 
         # BN处理（在创建optimizer之前）
         if cfg.stage2.freeze_bn:
-            if cfg.stage2.mode in ('crt', 'lws', 'moe_ltsei'):
+            if cfg.stage2.mode in ('crt', 'lws'):
                 print("[Stage-2] 冻结BN层统计量（CRT/LWS模式）")
                 base.apply(set_batchnorm_eval)
             elif cfg.stage2.sampler == 'same':
@@ -783,19 +757,6 @@ def main(cfg: DictConfig):
             print("[Stage-2] LWS: 冻结backbone，固定分类器，仅学习每类缩放")
             lws_init_scale = getattr(cfg.stage2, 'lws_init_scale', 1.0)
             prepare_lws_stage2(base, num_classes, init_scale=lws_init_scale)
-            params_to_optimize = [p for p in base.parameters() if p.requires_grad]
-
-            stage2_lr = cfg.stage2.lr or cfg.training.lr
-            print(f"[Stage-2] Learning rate: {stage2_lr}")
-
-            optimizer2 = build_optimizer(
-                cfg.stage2.optimizer or cfg.training.optimizer,
-                params_to_optimize, stage2_lr, stage2_wd
-            )
-
-        elif cfg.stage2.mode == 'moe_ltsei':
-            print("[Stage-2] MoE-LTSEI: freeze backbone, train MoE head")
-            freeze_backbone_params(base, classifier_names)
             params_to_optimize = [p for p in base.parameters() if p.requires_grad]
 
             stage2_lr = cfg.stage2.lr or cfg.training.lr

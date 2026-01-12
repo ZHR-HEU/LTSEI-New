@@ -724,40 +724,6 @@ def build_criterion(loss_name: str, cfg: DictConfig, class_counts):
                 gamma = loss_cfg.focal_gamma
             loss_kwargs['gamma'] = gamma
 
-    # MoE-LTSEI Loss 参数
-    if loss_name == 'MoELTSEILoss':
-        stage2_cfg = getattr(cfg, 'stage2', None)
-        moe_cfg = getattr(stage2_cfg, 'moe', None) if stage2_cfg else None
-        moe_loss_cfg = getattr(stage2_cfg, 'moe_loss', None) if stage2_cfg else None
-        exp_cfg = getattr(cfg, 'experiment', None)
-
-        loss_kwargs['class_counts'] = class_counts
-        loss_kwargs['num_experts'] = getattr(moe_cfg, 'num_experts', 3) if moe_cfg else 3
-        loss_kwargs['scale'] = getattr(moe_loss_cfg, 'scale', 30.0) if moe_loss_cfg else 30.0
-        loss_kwargs['beta'] = getattr(moe_loss_cfg, 'beta', 0.999) if moe_loss_cfg else 0.999
-        loss_kwargs['diff_gamma'] = getattr(moe_loss_cfg, 'diff_gamma', 2.0) if moe_loss_cfg else 2.0
-        loss_kwargs['diff_alpha'] = getattr(moe_loss_cfg, 'diff_alpha', 1.0) if moe_loss_cfg else 1.0
-
-        loss_kwargs['margin_type'] = getattr(moe_loss_cfg, 'margin_type', 'effective') if moe_loss_cfg else 'effective'
-        loss_kwargs['margin_m0'] = getattr(moe_loss_cfg, 'margin_m0', 0.35) if moe_loss_cfg else 0.35
-        loss_kwargs['margin_m1'] = getattr(moe_loss_cfg, 'margin_m1', 0.2) if moe_loss_cfg else 0.2
-        loss_kwargs['margin_gamma'] = getattr(moe_loss_cfg, 'margin_gamma', 0.5) if moe_loss_cfg else 0.5
-        loss_kwargs['margin_max'] = getattr(moe_loss_cfg, 'margin_max', None) if moe_loss_cfg else None
-
-        if moe_loss_cfg and hasattr(moe_loss_cfg, 'label_smoothing'):
-            loss_kwargs['label_smoothing'] = moe_loss_cfg.label_smoothing
-        else:
-            loss_kwargs['label_smoothing'] = getattr(cfg.training, 'label_smoothing', 0.0)
-
-        loss_kwargs['lambda_gate'] = getattr(moe_loss_cfg, 'lambda_gate', 1.0) if moe_loss_cfg else 1.0
-        loss_kwargs['lambda_lb'] = getattr(moe_loss_cfg, 'lambda_lb', 0.0) if moe_loss_cfg else 0.0
-        loss_kwargs['gate_target_smoothing'] = getattr(moe_loss_cfg, 'gate_target_smoothing', 0.0) if moe_loss_cfg else 0.0
-
-        if exp_cfg is not None:
-            loss_kwargs['group_strategy'] = getattr(exp_cfg, 'grouping', 'auto')
-            loss_kwargs['many_thresh'] = getattr(exp_cfg, 'many_thresh', 100)
-            loss_kwargs['few_thresh'] = getattr(exp_cfg, 'few_thresh', 20)
-
     # 需要 class_counts 的损失函数
     LOSSES_NEED_COUNTS = {
         'ClassBalancedLoss',
