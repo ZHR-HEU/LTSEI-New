@@ -204,6 +204,38 @@ class LogitAdjustedLinear(nn.Module):
         return logits - self.tau * self.log_prior
 
 
+class LearnableWeightScaling(nn.Module):
+    """
+    Learnable Weight Scaling (LWS).
+    Freeze a pretrained Linear classifier and learn per-class scales on weights.
+    """
+
+    def __init__(self, linear: nn.Linear, init_scale: float = 1.0):
+        super().__init__()
+        if not isinstance(linear, nn.Linear):
+            raise TypeError("LearnableWeightScaling expects an nn.Linear classifier")
+        init_scale = float(init_scale)
+        if init_scale <= 0:
+            raise ValueError("init_scale must be > 0")
+
+        self.in_features = int(linear.in_features)
+        self.num_classes = int(linear.out_features)
+
+        self.weight = nn.Parameter(linear.weight.detach().clone(), requires_grad=False)
+        if linear.bias is not None:
+            self.bias = nn.Parameter(linear.bias.detach().clone(), requires_grad=False)
+        else:
+            self.bias = None
+
+        log_scale = math.log(init_scale)
+        self.log_scale = nn.Parameter(torch.full((self.num_classes,), log_scale, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        scale = torch.exp(self.log_scale)
+        weight = self.weight * scale.unsqueeze(1)
+        return F.linear(x, weight, self.bias)
+
+
 class MoEClassifierHead(nn.Module):
     """
     Mixture-of-Experts classifier head for decoupled training.

@@ -126,7 +126,7 @@ stage1:
 # ------------------------------------------------------------
 stage2:
   enabled: true
-  mode: "crt"  # crt | finetune
+  mode: "crt"  # crt | lws | finetune | moe_ltsei
   epochs: 300
   lr: 0.1
 
@@ -153,6 +153,9 @@ stage2:
   # Stage-2 warmup
   warmup_epochs: 5
   warmup_multiplier: 1.0
+
+  # LWS (Learnable Weight Scaling)
+  lws_init_scale: 1.0
 
   # Focal Loss 参数
   focal_gamma: 2.0

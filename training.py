@@ -928,6 +928,48 @@ def find_classifier_layers(model: nn.Module, num_classes: int) -> List[Tuple[str
     return candidates if candidates else ([last_linear] if last_linear is not None else [])
 
 
+def _replace_module_by_name(model: nn.Module, module_name: str, new_module: nn.Module) -> None:
+    """Replace a submodule by its dotted name."""
+    if not module_name:
+        raise ValueError("module_name cannot be empty")
+    parent = model
+    parts = module_name.split(".")
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    setattr(parent, parts[-1], new_module)
+
+
+def prepare_lws_stage2(model: nn.Module, num_classes: int, init_scale: float = 1.0):
+    """
+    Prepare LWS stage-2: replace classifier with LWS head and freeze all params
+    except per-class scales.
+    """
+    from models import LearnableWeightScaling
+
+    clf_pairs = [
+        (name, layer)
+        for name, layer in find_classifier_layers(model, num_classes)
+        if isinstance(layer, nn.Linear) and layer.out_features == num_classes
+    ]
+    if not clf_pairs:
+        raise ValueError("[Stage-2 LWS] Cannot find classifier layers to wrap")
+
+    lws_modules = []
+    for name, layer in clf_pairs:
+        if not isinstance(layer, nn.Linear):
+            raise TypeError(f"[Stage-2 LWS] Layer '{name}' is not nn.Linear")
+        lws = LearnableWeightScaling(layer, init_scale=init_scale)
+        _replace_module_by_name(model, name, lws)
+        lws_modules.append(lws)
+
+    for p in model.parameters():
+        p.requires_grad = False
+    for lws in lws_modules:
+        lws.log_scale.requires_grad = True
+
+    return lws_modules
+
+
 def freeze_backbone_params(model: nn.Module, classifier_names: Iterable[str]):
     """冻结backbone参数，只保留分类器可训练"""
     cls = list(classifier_names)

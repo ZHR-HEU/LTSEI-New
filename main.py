@@ -48,7 +48,7 @@ from training import (
     # 训练与评估
     train_one_epoch, evaluate_with_analysis,
     # Stage-2
-    get_base_model, find_classifier_layers, freeze_backbone_params,
+    get_base_model, find_classifier_layers, prepare_lws_stage2, freeze_backbone_params,
     unfreeze_all_params, reinit_classifier_layers, set_batchnorm_eval,
     build_stage2_loader, apply_tau_norm_to_classifier,
     # 早停与检查点
@@ -751,8 +751,8 @@ def main(cfg: DictConfig):
 
         # BN处理（在创建optimizer之前）
         if cfg.stage2.freeze_bn:
-            if cfg.stage2.mode in ('crt', 'moe_ltsei'):
-                print("[Stage-2] 冻结BN层统计量（CRT模式）")
+            if cfg.stage2.mode in ('crt', 'lws', 'moe_ltsei'):
+                print("[Stage-2] 冻结BN层统计量（CRT/LWS模式）")
                 base.apply(set_batchnorm_eval)
             elif cfg.stage2.sampler == 'same':
                 print("[Stage-2] 冻结BN层统计量（采样分布不变）")
@@ -773,6 +773,20 @@ def main(cfg: DictConfig):
 
             stage2_lr = cfg.stage2.lr or cfg.training.lr
             print(f"[Stage-2] 学习率: {stage2_lr}")
+
+            optimizer2 = build_optimizer(
+                cfg.stage2.optimizer or cfg.training.optimizer,
+                params_to_optimize, stage2_lr, stage2_wd
+            )
+
+        elif cfg.stage2.mode == 'lws':
+            print("[Stage-2] LWS: 冻结backbone，固定分类器，仅学习每类缩放")
+            lws_init_scale = getattr(cfg.stage2, 'lws_init_scale', 1.0)
+            prepare_lws_stage2(base, num_classes, init_scale=lws_init_scale)
+            params_to_optimize = [p for p in base.parameters() if p.requires_grad]
+
+            stage2_lr = cfg.stage2.lr or cfg.training.lr
+            print(f"[Stage-2] Learning rate: {stage2_lr}")
 
             optimizer2 = build_optimizer(
                 cfg.stage2.optimizer or cfg.training.optimizer,
