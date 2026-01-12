@@ -1,0 +1,216 @@
+# ============================================================
+# 两阶段训练配置 - Stage1基线 + Stage2 CRT with Cost-Sensitive
+# ============================================================
+
+exp_name: "adsb_moe_ltsei"
+seed: 42
+device: "cuda"
+gpus: "3"
+amp: true
+console_log_interval: 1
+
+create_imbalance: true
+
+# ------------------------------------------------------------
+# 数据配置
+# ------------------------------------------------------------
+data:
+  path_train: "/home/dell/md3/zhahaoran/data/X_train.npy"
+  path_val: null
+  path_test: "/home/dell/md3/zhahaoran/data/X_test.npy"
+  path_train_label: "/home/dell/md3/zhahaoran/data/Y_train.npy"
+  path_val_label: null
+  path_test_label: "/home/dell/md3/zhahaoran/data/Y_test.npy"
+  closed_set_num: 60
+  val_ratio: 0.1
+
+  batch_size: 256
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+
+  target_length: 4800
+  normalize: true
+  in_memory: true
+
+  imbalance_ratio: 100.0
+
+# ------------------------------------------------------------
+# 模型配置
+# ------------------------------------------------------------
+model:
+  name: "ConvNetADSB"
+  dropout: 0.1
+  use_attention: true
+  norm_kind: "auto"
+
+# ------------------------------------------------------------
+# 损失函数配置 - Stage 1: 标准交叉熵（无重加权）
+# ------------------------------------------------------------
+loss:
+  name: "CrossEntropy"
+  # 无特殊参数，标准baseline
+
+# ------------------------------------------------------------
+# 采样策略配置 - Stage 1: 无重采样（自然分布）
+# ------------------------------------------------------------
+sampling:
+  # Stage-1采样策略
+  name: "none"  # none | inv_freq | class_uniform | sqrt | power | progressive_power
+
+  # power采样参数
+  alpha: 0.5
+
+  # progressive_power采样参数
+  alpha_start: 0.5
+  alpha_end: 0.0
+
+# ------------------------------------------------------------
+# 训练配置
+# ------------------------------------------------------------
+training:
+  epochs: 300
+  lr: 0.1
+  weight_decay: 5e-4
+  optimizer: "SGD"  # SGD + momentum=0.9（代码中自动配置）
+  grad_clip: 0.0    # SGD通常不需要梯度裁剪
+  label_smoothing: 0
+
+# ------------------------------------------------------------
+# 学习率调度器配置
+# ------------------------------------------------------------
+scheduler:
+  name: "cosine"
+  warmup_epochs: 5
+  warmup_multiplier: 1.0
+
+# ------------------------------------------------------------
+# 早停配置
+# ------------------------------------------------------------
+early_stopping:
+  patience: 30
+  monitor: "val_balanced_acc"
+  mode: "max"
+
+# ------------------------------------------------------------
+# 评估配置
+# ------------------------------------------------------------
+evaluation:
+  eval_logit_adjust: "none"
+  eval_logit_tau: 1.0
+
+# ------------------------------------------------------------
+# 实验分组配置
+# ------------------------------------------------------------
+experiment:
+  grouping: "auto"
+  many_thresh: 100
+  few_thresh: 20
+# ------------------------------------------------------------
+# Stage-1 仅加载测试配置
+# ------------------------------------------------------------
+stage1:
+  # true: 跳过 Stage-1 训练，直接加载 checkpoint；默认仅做测试
+  load_weights_only: false
+  # true: 在 load_weights_only=true 时，仍继续进入 Stage-2 训练
+  load_weights_only_run_stage2: false
+  # Stage-1 权重路径（load_weights_only=true 时使用）
+  checkpoint: "/home/dell/md3/zhahaoran/MOE-LTSEI/best.pth"
+
+# ------------------------------------------------------------
+# 第二阶段训练配置 - CRT + Progressive Sampling + Cost-Sensitive
+# ------------------------------------------------------------
+stage2:
+  enabled: true
+  mode: "crt"  # crt | finetune
+  epochs: 300
+  lr: 0.1
+
+  # 优化器配置
+  weight_decay: 5e-4
+  optimizer: "SGD"  # CRT只训练分类器，SGD也合适
+
+  # 损失函数：Cost-Sensitive Cross-Entropy
+  loss: "CostSensitiveCE"
+  cost_strategy: "auto"
+  #   - "auto": 逆频率 (1/n_c)
+  #   - "sqrt": 平方根逆频率 (1/sqrt(n_c))
+  #   - "log": 对数逆频率 (1/log(1+n_c))
+
+  # 采样策略：Progressive Power Sampling
+  # alpha从1.0→0.0 线性衰减：原始分布 → 类均匀采样
+  sampler: "progressive_power"
+  alpha_start: 1.0
+  alpha_end: 0.0
+
+  # 冻结BN层统计量（CRT标准做法）
+  freeze_bn: true
+
+  # Stage-2 warmup
+  warmup_epochs: 5
+  warmup_multiplier: 1.0
+
+
+# 这些参数被 stage2.sampler="progressive_power" 引用
+sampling_progressive:
+  alpha_start: 0.5  # 初始 alpha（接近原始分布）
+  alpha_end: 0.0    # 最终 alpha（类均匀采样）
+  # alpha 随 epoch 线性衰减：
+  #   - alpha=1.0: 原始分布
+  #   - alpha=0.5: 平方根重采样
+  #   - alpha=0.0: 类均匀采样
+
+# ------------------------------------------------------------
+# 第三阶段校准配置（禁用）
+# ------------------------------------------------------------
+stage3:
+  mode: "none"
+  tau_norm: 1.0
+  logit_tau: 1.0
+
+# ------------------------------------------------------------
+# 可视化配置
+# ------------------------------------------------------------
+visualization:
+  enabled: true
+  dpi: 400
+  panel_mm: 85
+  panel_scale: 1.0
+
+  max_samples: 5000  # 快速预览，设置为 null 使用全部数据
+
+  # 基础训练分析
+  plot_training_curves: true
+  plot_learning_rate: true
+  plot_class_distribution: true
+
+  # 特征可视化
+  plot_tsne_2d: true
+  plot_tsne_3d: false  # 计算密集，快速实验时关闭
+  tsne_perplexity: 30
+  tsne_n_iter: 1000
+
+  # 性能分析
+  plot_confusion_matrix: true
+  cm_normalize: true
+  plot_per_class_acc: true
+  plot_group_performance: true
+
+  # 不平衡学习专用可视化
+  plot_sample_vs_performance: true
+  plot_confidence_dist: true
+  plot_top_confusions: true
+  top_confusions_k: 10
+
+  plot_pr_curves: false  # 8个类别，可以启用
+  plot_calibration: true
+  calibration_bins: 10
+
+  class_names: null
+
+
+
+hydra:
+  output_subdir: null
+  job:
+    chdir: false
