@@ -163,7 +163,15 @@ stage2:
   # MoE 配置
   moe_config:
     num_experts: 3
-    w_balance: 0.1
+    # 门控参数
+    w_balance: 0.1        # 负载平衡损失权重 [0.0, 0.01, 0.05, 0.1, 0.5]
+    gate_tau: 1.0         # 门控网络温度τ [0.5, 1.0, 1.5, 2.0]
+    # Expert 2 (LogitAdjusted) 参数
+    la_tau: 1.0           # LogitAdjusted温度τ [0.5, 1.0, 1.5, 2.0]
+    # Expert 1 (Tail Expert - CosineMargin) 参数
+    scale: 30.0           # 余弦分类器缩放因子 [10.0, 20.0, 30.0, 50.0]
+    ldam_power: 0.25      # LDAM边距幂次 [0.1, 0.25, 0.5]
+    ldam_max_m: 0.5       # LDAM最大边距 [0.3, 0.5, 0.7]
 
 # 这些参数被 stage2.sampler="progressive_power" 引用
 sampling_progressive:

@@ -759,10 +759,23 @@ def main(cfg: DictConfig):
             if moe_cfg is None:
                 raise ValueError("[Stage-2] MoE requires stage2.moe_config")
 
+            # 获取所有MoE参数
             num_experts = getattr(moe_cfg, 'num_experts', 3)
+            w_balance = getattr(moe_cfg, 'w_balance', 0.1)
             gate_tau = getattr(moe_cfg, 'gate_tau', 1.0)
             la_tau = getattr(moe_cfg, 'la_tau', 1.0)
-            w_balance = getattr(moe_cfg, 'w_balance', 0.1)
+            scale = getattr(moe_cfg, 'scale', 30.0)
+            ldam_power = getattr(moe_cfg, 'ldam_power', 0.25)
+            ldam_max_m = getattr(moe_cfg, 'ldam_max_m', 0.5)
+
+            print(f"[Stage-2] MoE Config:")
+            print(f"  - num_experts: {num_experts}")
+            print(f"  - w_balance: {w_balance}")
+            print(f"  - gate_tau: {gate_tau}")
+            print(f"  - la_tau: {la_tau}")
+            print(f"  - scale: {scale}")
+            print(f"  - ldam_power: {ldam_power}")
+            print(f"  - ldam_max_m: {ldam_max_m}")
 
             swap_classifier(
                 base,
@@ -770,7 +783,10 @@ def main(cfg: DictConfig):
                 class_counts=class_counts,
                 num_experts=num_experts,
                 gate_tau=gate_tau,
-                tau=la_tau
+                tau=la_tau,
+                scale=scale,
+                ldam_power=ldam_power,
+                ldam_max_m=ldam_max_m
             )
 
             freeze_backbone_params(base, ["classifier"])

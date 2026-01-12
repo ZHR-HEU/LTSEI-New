@@ -266,9 +266,21 @@ class MoEGatingNetwork(nn.Module):
 class MoEClassifier(nn.Module):
     """
     Mixture of Experts classifier for stage-2.
+
+    Args:
+        in_features: Input feature dimension
+        num_classes: Number of classes
+        num_experts: Number of experts (currently only supports 3)
+        class_counts: Per-class sample counts
+        gate_tau: Temperature for gating network
+        la_tau: Temperature for LogitAdjusted expert
+        scale: Scale factor for CosineMargin classifier (Expert 1)
+        ldam_power: Power for LDAM margin calculation
+        ldam_max_m: Maximum margin for LDAM
     """
     def __init__(self, in_features: int, num_classes: int, num_experts: int = 3,
-                 class_counts: Optional[np.ndarray] = None, gate_tau: float = 1.0, la_tau: float = 1.0):
+                 class_counts: Optional[np.ndarray] = None, gate_tau: float = 1.0, la_tau: float = 1.0,
+                 scale: float = 30.0, ldam_power: float = 0.25, ldam_max_m: float = 0.5):
         super().__init__()
         self.num_experts = int(num_experts)
         self.num_classes = int(num_classes)
@@ -280,14 +292,14 @@ class MoEClassifier(nn.Module):
 
         margins = None
         if class_counts is not None:
-            margins = ldam_margins_from_counts(class_counts)
+            margins = ldam_margins_from_counts(class_counts, power=ldam_power, max_m=ldam_max_m)
 
         expert2 = LogitAdjustedLinear(in_features, num_classes, class_counts, tau=la_tau) \
             if class_counts is not None else nn.Linear(in_features, num_classes)
 
         self.experts = nn.ModuleList([
             nn.Linear(in_features, num_classes),                           # Expert 0: Generalist
-            CosineMarginClassifier(in_features, num_classes, scale=30.0, margins=margins),  # Expert 1: Tail
+            CosineMarginClassifier(in_features, num_classes, scale=scale, margins=margins),  # Expert 1: Tail
             expert2                                                        # Expert 2: Conservative
         ])
 
@@ -367,6 +379,19 @@ def swap_classifier(model: nn.Module, head: str,
     """
     Replace `model.classifier` with an advanced head.
     head in {"linear", "cosine", "cosine_ldam", "logit_adjust", "moe"}
+
+    Args:
+        model: Model with a 'classifier' attribute
+        head: Type of classifier head
+        class_counts: Per-class sample counts (required for some heads)
+        in_features: Input feature dimension (auto-detected if classifier is Linear)
+        num_classes: Number of classes (auto-detected if classifier is Linear)
+        scale: Scale factor for cosine classifier (default: 30.0)
+        tau: Temperature for logit adjustment (default: 1.0)
+        ldam_power: Power for LDAM margin calculation (default: 0.25)
+        ldam_max_m: Maximum LDAM margin (default: 0.5)
+        num_experts: Number of MoE experts (default: 3)
+        gate_tau: Temperature for MoE gating network (default: 1.0)
     """
     if not hasattr(model, "classifier"):
         raise AttributeError("Model has no attribute 'classifier'")
@@ -399,7 +424,10 @@ def swap_classifier(model: nn.Module, head: str,
             num_experts=num_experts,
             class_counts=class_counts,
             gate_tau=gate_tau,
-            la_tau=tau
+            la_tau=tau,
+            scale=scale,
+            ldam_power=ldam_power,
+            ldam_max_m=ldam_max_m
         )
     else:
         raise ValueError(f"Unknown head: {head}")
